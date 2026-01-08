@@ -58,27 +58,77 @@ if 'exam_json' not in st.session_state:
 # --- HELPER: resolve student answer from correction item or from session_state fallbacks ---
 def _resolve_student_answer(item):
     try:
-        if isinstance(item, dict) and item.get('student_answer'):
-            return item.get('student_answer')
-
-        item_id = None
         if isinstance(item, dict):
+            # Check if the student answer is directly available
+            if item.get('student_answer'):
+                return item.get('student_answer')
+
+            # Attempt to retrieve the answer from session state using the item ID
             item_id = item.get('id')
+            if item_id and item_id in st.session_state:
+                return st.session_state.get(item_id)
 
-        if item_id and item_id in st.session_state:
-            return st.session_state.get(item_id)
+            # Handle legacy keys for language exercises
+            if item_id and item_id.startswith('lang_'):
+                ex = item_id[len('lang_'):]
+                k_new = f"lang_{ex}_0"
+                k_old = f"lang_match_{ex}"
+                for k in (k_new, k_old):
+                    if k in st.session_state:
+                        return st.session_state.get(k)
 
-        if item_id and item_id.startswith('lang_'):
-            ex = item_id[len('lang_'):]
-            k_new = f"lang_{ex}_0"
-            k_old = f"lang_match_{ex}"
-            for k in (k_new, k_old):
-                if k in st.session_state:
-                    return st.session_state.get(k)
-
-    except Exception:
-        pass
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération de la réponse: {str(e)}")
     return 'N/A'
+
+def render_correction_item(item):
+    """Render a single correction item with a professional comparison UI."""
+    status = item.get('status', 'unknown')
+    status_icon = "✅" if status == "correct" else "⚠️" if status == "partial" else "❌"
+    color = "#28a745" if status == "correct" else "#ffc107" if status == "partial" else "#dc3545"
+    bg_color = "#f0fff4" if status == "correct" else "#fffbeb" if status == "partial" else "#fff5f5"
+    
+    q_id = item.get('id', '?')
+    points_earned = item.get('points_earned', 0)
+    points_reserved = item.get('points_reserved') or item.get('points', 0)
+    
+    with st.container():
+        st.markdown(f"""
+        <div style="border-left: 5px solid {color}; background-color: {bg_color}; padding: 15px; border-radius: 8px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <span style="font-weight: bold; font-size: 1.1rem;">{status_icon} Question {q_id}</span>
+                <span style="background-color: {color}; color: white; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem;">
+                    {points_earned} / {points_reserved} pts
+                </span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        # Details inside columns
+        col_q, col_fb = st.columns([1, 1])
+        
+        with col_q:
+            st.markdown("**❓ Question / Instruction :**")
+            instruction = item.get('instruction')
+            question_text = item.get('question')
+            if instruction:
+                st.caption(f"_{instruction}_")
+            st.info(question_text if question_text else "Question non disponible")
+            
+            st.markdown("**👤 Votre Réponse :**")
+            student_ans = item.get('student_answer') or _resolve_student_answer(item)
+            st.code(student_ans if student_ans else "Pas de réponse", language=None)
+            
+        with col_fb:
+            st.markdown("**🎯 Réponse Correcte :**")
+            correct_ans = item.get('correct_answer', 'N/A')
+            st.success(correct_ans if correct_ans else "N/A")
+            
+            st.markdown("**💡 Remarque du Prof IA :**")
+            remark = item.get('ai_remark') or item.get('explanation') or "Pas de feedback spécifique."
+            st.warning(remark)
+        
+        st.divider()
 
 # --- FONCTION D'AUTHENTIFICATION ---
 def verify_access_code(full_name, access_code):
@@ -470,7 +520,7 @@ if st.session_state.get('correction_data'):
     st.balloons()
     st.success("### 🎉 Correction Terminée!")
     
-    corrections = resultat.get('detailed_correction', [])
+    corrections = resultat.get('results') or resultat.get('detailed_correction') or []
     
     score_total = resultat.get('score_total') if resultat.get('score_total') is not None else sum(item.get('points_earned', 0) for item in corrections)
     max_score = resultat.get('max_score') if resultat.get('max_score') is not None else 40
@@ -556,87 +606,32 @@ if st.session_state.get('correction_data'):
     
     # Détails par section
     if corrections:
-        comp_items = [item for item in corrections if item['id'].startswith('comp_')]
-        lang_items = [item for item in corrections if item['id'].startswith('lang_')]
-        writing_items = [item for item in corrections if item['id'].startswith('writing_')]
+        # Sort items by ID or preserve ordering from 'results'
+        # Group by section for better UX
+        comp_items = [item for item in corrections if str(item.get('id', '')).startswith('comp_')]
+        lang_items = [item for item in corrections if str(item.get('id', '')).startswith('lang_')]
+        writing_items = [item for item in corrections if str(item.get('id', '')).startswith('writing_')]
+        other_items = [item for item in corrections if item not in comp_items and item not in lang_items and item not in writing_items]
         
         if comp_items:
             st.subheader("📖 Section Compréhension")
-            comp_score = sum(item.get('points_earned', 0) for item in comp_items)
-            comp_max = sum(item.get('points_earned', 0) + (1 if item.get('status') == 'correct' else 0.5 if item.get('status') == 'partial' else 0) for item in comp_items if item.get('status') in ['correct', 'partial'])
-            
-            st.progress(comp_score / max(comp_max, 1) if comp_max > 0 else 0)
-            st.caption(f"Score: {comp_score:.1f}/{comp_max:.1f} pts")
-            
             for item in comp_items:
-                status = item.get('status', 'unknown')
-                status_icon = "✅" if status == "correct" else "⚠️" if status == "partial" else "❌"
-                points = item.get('points_earned', 0)
-
-                with st.expander(f"{status_icon} {item['id']} - {points} pts", expanded=False):
-                    left, right = st.columns([2, 3])
-                    with left:
-                        st.markdown("**Votre réponse :**")
-                        student_answer = _resolve_student_answer(item)
-                        st.text_area("", value=student_answer, key=f"view_{item['id']}", height=120)
-                        st.caption(f"Statut: {status} • Points: {points}")
-                    with right:
-                        if item.get('correct_answer'):
-                            st.markdown("**Réponse attendue :**")
-                            st.success(item.get('correct_answer'))
-                        st.markdown("**Explication / Remarques du prof IA :**")
-                        st.info(item.get('explanation', 'N/A'))
+                render_correction_item(item)
         
         if lang_items:
             st.subheader("🔤 Section Langue")
-            lang_score = sum(item.get('points_earned', 0) for item in lang_items)
-            lang_max = sum(item.get('points_earned', 0) + (1 if item.get('status') == 'correct' else 0.5 if item.get('status') == 'partial' else 0) for item in lang_items if item.get('status') in ['correct', 'partial'])
-            
-            st.progress(lang_score / max(lang_max, 1) if lang_max > 0 else 0)
-            st.caption(f"Score: {lang_score:.1f}/{lang_max:.1f} pts")
-            
             for item in lang_items:
-                status = item.get('status', 'unknown')
-                status_icon = "✅" if status == "correct" else "⚠️" if status == "partial" else "❌"
-                points = item.get('points_earned', 0)
-
-                with st.expander(f"{status_icon} {item['id']} - {points} pts", expanded=False):
-                    left, right = st.columns([2, 3])
-                    with left:
-                        st.markdown("**Votre réponse :**")
-                        student_answer = _resolve_student_answer(item)
-                        st.text_area("", value=student_answer, key=f"view_{item['id']}", height=100)
-                        st.caption(f"Statut: {status} • Points: {points}")
-                    with right:
-                        if item.get('correct_answer'):
-                            st.markdown("**Réponse attendue :**")
-                            st.success(item.get('correct_answer'))
-                        st.markdown("**Explication / Remarques :**")
-                        st.info(item.get('explanation', 'N/A'))
+                render_correction_item(item)
         
         if writing_items:
             st.subheader("✍️ Section Rédaction")
-            writing_score = sum(item.get('points_earned', 0) for item in writing_items)
-            writing_max = sum(item.get('points_earned', 0) + (1 if item.get('status') == 'correct' else 2 if item.get('status') == 'partial' else 0) for item in writing_items if item.get('status') in ['correct', 'partial'])
-            
-            st.progress(writing_score / max(writing_max, 1) if writing_max > 0 else 0)
-            st.caption(f"Score: {writing_score:.1f}/{writing_max:.1f} pts")
-            
             for item in writing_items:
-                status = item.get('status', 'unknown')
-                status_icon = "✅" if status == "correct" else "⚠️" if status == "partial" else "❌"
-                points = item.get('points_earned', 0)
-
-                with st.expander(f"{status_icon} {item['id']} - {points} pts", expanded=False):
-                    left, right = st.columns([2, 3])
-                    with left:
-                        st.markdown("**Votre réponse (extrait) :**")
-                        student_answer = _resolve_student_answer(item)
-                        st.text_area("", value=student_answer, key=f"view_{item['id']}", height=200)
-                        st.caption(f"Statut: {status} • Points: {points}")
-                    with right:
-                        st.markdown("**Conseils & Remarques du prof IA :**")
-                        st.warning(item.get('explanation', 'N/A'))
+                render_correction_item(item)
+        
+        if other_items:
+            st.subheader("📝 Autres Questions")
+            for item in other_items:
+                render_correction_item(item)
         
         st.divider()
         

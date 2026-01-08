@@ -78,6 +78,44 @@ def _resolve_student_answer(item):
         pass
     return 'N/A'
 
+# --- Helper: retrieve question and associated text from exam_json given an item id ---
+def _get_question_and_text(item_id, exam_json):
+    # For comprehension: comp_{ex_id}_{q_idx}
+    if item_id.startswith('comp_') and 'comprehension' in exam_json:
+        comp = exam_json['comprehension']
+        ex_id = item_id.split('_')[1]
+        q_idx = int(item_id.split('_')[2])
+        # Find the right exercice
+        for exercice in comp.get('exercices', []):
+            if str(exercice.get('id')) == ex_id:
+                questions = exercice.get('questions', [])
+                if 0 <= q_idx < len(questions):
+                    q = questions[q_idx]
+                    texte = comp.get('texte', None)
+                    return q.get('question', 'Question non disponible'), texte or 'Texte non disponible'
+    # For language: lang_{ex_id}_{q_idx} or lang_free_{ex_id}_{q_idx}
+    if (item_id.startswith('lang_') or item_id.startswith('lang_free_')) and 'language' in exam_json:
+        lang = exam_json['language']
+        ex_id = item_id.split('_')[1]
+        q_idx = int(item_id.split('_')[2]) if '_' in item_id else 0
+        for exercice in lang.get('exercices', []):
+            if str(exercice.get('id')) == ex_id:
+                # details or questions
+                if 'details' in exercice and 0 <= q_idx < len(exercice['details']):
+                    q = exercice['details'][q_idx]
+                    return q.get('question', 'Question non disponible'), None
+                if 'questions' in exercice and 0 <= q_idx < len(exercice['questions']):
+                    q = exercice['questions'][q_idx]
+                    return q.get('question', 'Question non disponible'), None
+    # For writing: writing_{sujet_id}
+    if item_id.startswith('writing_') and 'writing' in exam_json:
+        writing = exam_json['writing']
+        sujet_id = item_id.split('_')[1]
+        for sujet in writing.get('sujets', []):
+            if str(sujet.get('id')) == sujet_id:
+                return sujet.get('sujet', 'Sujet non disponible'), None
+    return 'Question non disponible', 'Texte non disponible'
+
 # --- FONCTION D'AUTHENTIFICATION ---
 def verify_access_code(full_name, access_code):
     """Vérifier le code d'accès auprès de Supabase."""
@@ -706,9 +744,15 @@ if st.session_state.get("waiting_for_correction") or st.session_state.get('corre
                             with st.expander(f"{status_icon} {item['id']} - {points} pts", expanded=False):
                                 left, right = st.columns([2, 3])
                                 with left:
+                                    # Afficher la question et le texte associé
+                                    question, texte = _get_question_and_text(item['id'], data if 'data' in locals() else st.session_state.get('exam_json', {}))
+                                    st.markdown("**Question :**")
+                                    st.info(question)
+                                    if texte and texte != 'Texte non disponible':
+                                        st.markdown("**Texte associé :**")
+                                        st.write(texte)
                                     st.markdown("**Votre réponse (extrait) :**")
                                     student_answer = _resolve_student_answer(item)
-                                    # show a larger text area for writing
                                     st.text_area("", value=student_answer, key=f"view_{item['id']}", height=200)
                                     st.caption(f"Statut: {status} • Points: {points}")
                                 with right:
