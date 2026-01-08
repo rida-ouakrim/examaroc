@@ -182,6 +182,23 @@ def login_page():
                 else:
                     st.error("❌ Code d'accès invalide. Veuillez réessayer.")
 
+# --- HELPER: Save current answers to Supabase ---
+def save_answers():
+    """Extract answers from session state and save to Supabase in real-time."""
+    if st.session_state.get('current_exam_id'):
+        user_answers = {}
+        for key in st.session_state.keys():
+            if any(key.startswith(prefix) for prefix in ["ans_", "lang_", "writing_", "comp_"]):
+                user_answers[key] = st.session_state[key]
+        
+        if user_answers:
+            try:
+                supabase.table("exams_streamlit").update({
+                    "student_responses": user_answers
+                }).eq("id", st.session_state.current_exam_id).execute()
+            except Exception:
+                pass # Silent fail during typing to avoid interrupting the user
+
 # --- PAGE PRINCIPALE ---
 if not st.session_state.authenticated:
     login_page()
@@ -276,7 +293,8 @@ if not st.session_state.get('exam_json') and not st.session_state.get('correctio
         with col1:
             filiere = st.selectbox("📚 Sélectionner la Filière", ["Science Physique", "SVT", "Sciences Math"])
         with col2:
-            duration = st.selectbox("⏱️ Durée (minutes)", [60, 90, 120, 180])
+            st.info("⏱️ Durée : **120 minutes** (Fixe)")
+            duration = 120
         
         if st.button("🚀 Générer un nouvel examen", use_container_width=True):
             with st.spinner("Génération de votre examen..."):
@@ -337,10 +355,6 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
         st.error("❌ Données invalides")
         st.stop()
     
-    # Afficher les données brutes (optionnel)
-    with st.expander("📊 Afficher les données brutes"):
-        st.json(data)
-    
     title = data['info'].get('title') if 'info' in data else 'Examen'
     st.title(title)
     
@@ -371,7 +385,7 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
                         q_text = question.get('question', '')
                         points = question.get('points', 0)
                         st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                        st.text_area("Réponse:", key=f"comp_{ex_id}_{q_idx}", height=100)
+                        st.text_area("Réponse:", key=f"comp_{ex_id}_{q_idx}", height=100, on_change=save_answers)
 
     with t2:
         if 'language' in data:
@@ -394,21 +408,21 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
                             st.write("**Fonctions:**")
                             for func in exercice['matching'].get('fonctions', []):
                                 st.write(f"- {func['id']}. {func['text']}")
-                        st.text_input("Réponses (ex: 1-a, 2-b...)", key=f"lang_{ex_id}_0")
+                        st.text_input("Réponses (ex: 1-a, 2-b...)", key=f"lang_{ex_id}_0", on_change=save_answers)
                     
                     if 'details' in exercice:
                         for q_idx, detail in enumerate(exercice['details']):
                             q_text = detail.get('question', '')
                             points = detail.get('points', 0)
                             st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                            st.text_area("Réponse:", key=f"lang_{ex_id}_{q_idx}", height=80)
+                            st.text_area("Réponse:", key=f"lang_{ex_id}_{q_idx}", height=80, on_change=save_answers)
                     
                     if 'questions' in exercice:
                         for q_idx, question in enumerate(exercice['questions']):
                             q_text = question.get('question', '')
                             points = question.get('points', 0)
                             st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                            st.text_area("Réponse:", key=f"lang_free_{ex_id}_{q_idx}", height=100)
+                            st.text_area("Réponse:", key=f"lang_free_{ex_id}_{q_idx}", height=100, on_change=save_answers)
 
     with t3:
         if 'writing' in data:
@@ -422,7 +436,7 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
                     
                     st.markdown(f"### Sujet {sujet_id}: {sujet_type} _(points: {points})_")
                     st.markdown(f"**{sujet.get('sujet', 'Pas de description')}**")
-                    st.text_area("Votre réponse:", key=f"writing_{sujet_id}", height=250)
+                    st.text_area("Votre réponse:", key=f"writing_{sujet_id}", height=250, on_change=save_answers)
     
     # SOUMISSION
     st.divider()
