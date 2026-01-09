@@ -5,6 +5,7 @@ from supabase import create_client
 import os
 from dotenv import load_dotenv
 import json
+from datetime import datetime, timezone
 
 # --- Load environment variables ---
 load_dotenv()
@@ -54,6 +55,118 @@ if 'correction_data' not in st.session_state:
     st.session_state.correction_data = None
 if 'exam_json' not in st.session_state:
     st.session_state.exam_json = None
+if 'generation_start_time' not in st.session_state:
+    st.session_state.generation_start_time = None
+
+# --- HELPER: Normalize exam data structure from n8n ---
+def normalize_exam_data(data):
+    """Normalize differences between n8n output and Streamlit app expectations."""
+    if isinstance(data, list) and len(data) > 0:
+        data = data[0]
+    
+    if not isinstance(data, dict):
+        return data
+
+    # Extract exam_content if it's a wrapper from n8n
+    if 'exam_content' in data:
+        data = data['exam_content']
+
+    # 1. Normalize Comprehension
+    if 'comprehension' in data:
+        comp = data['comprehension']
+        # text vs texte
+        if 'text' in comp and 'texte' not in comp:
+            comp['texte'] = comp['text']
+        # questions vs exercices
+        if 'questions' in comp and 'exercices' not in comp:
+            if isinstance(comp['questions'], list):
+                if len(comp['questions']) > 0 and 'questions' in comp['questions'][0]:
+                    comp['exercices'] = comp['questions']
+                else:
+                    # Group questions by instruction
+                    groups = []
+                    current_instr = None
+                    current_group = None
+                    for q in comp['questions']:
+                        # Ensure question has a stable ID with comp_ prefix
+                        q_id = q.get('id', '')
+                        if not q_id.startswith('comp_'):
+                             q_id = f"comp_gen_{len(groups)}_{q_id or len(groups)}"
+                        q['id'] = q_id
+                        
+                        instr = q.get('instruction', 'Questions')
+                        if instr != current_instr:
+                            current_instr = instr
+                            current_group = {"id": str(len(groups)+1), "consigne": instr, "questions": []}
+                            groups.append(current_group)
+                        current_group['questions'].append(q)
+                    comp['exercices'] = groups
+        
+        # Normalize nested question keys in Comprehension
+        if 'exercices' in comp:
+            for ex in comp['exercices']:
+                if 'questions' in ex:
+                    for q in ex['questions']:
+                        if 'question_text' in q and 'question' not in q:
+                            q['question'] = q['question_text']
+
+    # 2. Normalize Language
+    if 'language' in data:
+        lang = data['language']
+        if 'questions' in lang and 'exercices' not in lang:
+             if isinstance(lang['questions'], list):
+                if len(lang['questions']) > 0 and ('questions' in lang['questions'][0] or 'details' in lang['questions'][0]):
+                    lang['exercices'] = lang['questions']
+                else:
+                    # Group questions by instruction
+                    groups = []
+                    current_instr = None
+                    current_group = None
+                    for q in lang['questions']:
+                        # Ensure question has a stable ID with lang_ prefix
+                        q_id = q.get('id', '')
+                        if not q_id.startswith('lang_'):
+                            q_id = f"lang_gen_{len(groups)}_{q_id or len(groups)}"
+                        q['id'] = q_id
+                        
+                        instr = q.get('instruction', 'Language Tasks')
+                        if instr != current_instr:
+                            current_instr = instr
+                            current_group = {"id": str(len(groups)+1), "consigne": instr, "questions": []}
+                            groups.append(current_group)
+                        current_group['questions'].append(q)
+                    lang['exercices'] = groups
+        
+        # Normalize nested question keys in Language
+        if 'exercices' in lang:
+            for ex in lang['exercices']:
+                for key in ['questions', 'details']:
+                    if key in ex:
+                        for q in ex[key]:
+                            if 'question_text' in q and 'question' not in q:
+                                q['question'] = q['question_text']
+
+    # 3. Normalize Writing
+    if 'writing' in data:
+        writ = data['writing']
+        # topics vs sujets
+        if 'topics' in writ and 'sujets' not in writ:
+            writ['sujets'] = writ['topics']
+        
+        if 'sujets' in writ:
+            for sujet in writ['sujets']:
+                # Ensure prefixed ID
+                s_id = sujet.get('id', '')
+                if not s_id.startswith('writing_'):
+                    sujet['id'] = f"writing_{s_id or '1'}"
+                # question_text vs sujet
+                if 'question_text' in sujet and 'sujet' not in sujet:
+                    sujet['sujet'] = sujet['question_text']
+                # instruction vs type
+                if 'instruction' in sujet and 'type' not in sujet:
+                    sujet['type'] = sujet['instruction']
+
+    return data
 
 # --- HELPER: resolve student answer from correction item or from session_state fallbacks ---
 def _resolve_student_answer(item):
@@ -182,6 +295,41 @@ def login_page():
                 else:
                     st.error("❌ Code d'accès invalide. Veuillez réessayer.")
 
+# --- Custom CSS for Moroccan Exam Style ---
+st.markdown("""
+<style>
+.exam-paper {
+    background-color: white;
+    padding: 40px;
+    border: 1px solid #ddd;
+    border-radius: 8px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    font-family: 'Times New Roman', Times, serif;
+}
+.instr-bold {
+    font-weight: 900;
+    font-size: 1.1rem;
+    text-transform: uppercase;
+    margin-top: 25px;
+    margin-bottom: 10px;
+    color: #1a1a1a;
+}
+.question-row {
+    margin-left: 20px;
+    margin-bottom: 15px;
+}
+.points-tag {
+    font-weight: normal;
+    font-style: italic;
+    color: #555;
+}
+/* Hide default Streamlit padding for better paper look */
+.block-container {
+    padding-top: 2rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # --- HELPER: Save current answers to Supabase ---
 def save_answers():
     """Extract answers from session state and save to Supabase in real-time."""
@@ -274,15 +422,39 @@ if not st.session_state.get('exam_json') and not st.session_state.get('correctio
                                 st.rerun()
                     
                     with col3:
-                        if exam['status'] in ['submitted', 'ready'] and st.button("🔍 Voir", key=f"view_{idx}"):
-                            res_corr = supabase.table("exam_results").select("*").eq("exam_id", exam['id']).eq("student_id", student_id).order("created_at", desc=True).limit(1).execute()
-                            if res_corr.data:
-                                st.session_state.correction_data = res_corr.data[0]
-                                st.session_state.current_exam_id = exam['id']
-                                st.session_state.current_user = student_id
+                        sub_col1, sub_col2 = st.columns(2)
+                        with sub_col1:
+                            if exam['status'] in ['submitted', 'ready'] and st.button("🔍 Voir", key=f"view_{idx}"):
+                                res_corr = supabase.table("exam_results").select("*").eq("exam_id", exam['id']).eq("student_id", student_id).order("created_at", desc=True).limit(1).execute()
+                                if res_corr.data:
+                                    st.session_state.correction_data = res_corr.data[0]
+                                    st.session_state.current_exam_id = exam['id']
+                                    st.session_state.current_user = student_id
+                                    st.rerun()
+                                else:
+                                    st.info("⏳ Aucune correction disponible.")
+                        
+                        with sub_col2:
+                            if st.button("🗑️", key=f"delete_{idx}"):
+                                st.session_state[f"confirm_delete_{exam['id']}"] = True
+                        
+                        if st.session_state.get(f"confirm_delete_{exam['id']}"):
+                            st.warning("Supprimer cet examen ?")
+                            c1, c2 = st.columns(2)
+                            if c1.button("✅ Oui", key=f"yes_{idx}"):
+                                try:
+                                    supabase.table("exam_results").delete().eq("exam_id", exam['id']).execute()
+                                    supabase.table("exams_streamlit").delete().eq("id", exam['id']).execute()
+                                    st.session_state[f"confirm_delete_{exam['id']}"] = False
+                                    st.success("Examen supprimé")
+                                    time.sleep(1)
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Erreur deletion: {e}")
+                            if c2.button("❌ Non", key=f"no_{idx}"):
+                                st.session_state[f"confirm_delete_{exam['id']}"] = False
                                 st.rerun()
-                            else:
-                                st.info("⏳ Aucune correction disponible.")
+                                
         except Exception as e:
             st.error(f"⚠️ Erreur: {str(e)}")
 
@@ -298,40 +470,47 @@ if not st.session_state.get('exam_json') and not st.session_state.get('correctio
         
         if st.button("🚀 Générer un nouvel examen", use_container_width=True):
             with st.spinner("Génération de votre examen..."):
+                # Clear previous state
+                st.session_state.exam_json = None
+                st.session_state.correction_data = None
+                st.session_state.current_exam_id = None
+                st.session_state.generation_start_time = datetime.now(timezone.utc).isoformat()
+                
                 payload = {
                     "student_id": student_id,
                     "filiere": filiere,
                     "duration": duration
                 }
                 try:
-                    requests.post(N8N_WEBHOOK, json=payload)
-                    st.session_state.is_waiting = True
-                    st.session_state.current_user = student_id
-                    st.info("✅ Génération lancée. Patientez...")
-                    time.sleep(2)
-                    st.rerun()
+                    response = requests.post(N8N_WEBHOOK, json=payload)
+                    if response.status_code == 200:
+                        raw_data = response.json()
+                        exam_data = normalize_exam_data(raw_data)
+                        st.session_state.exam_json = exam_data
+                        
+                        # Persist to Supabase immediately
+                        try:
+                            res_insert = supabase.table("exams_streamlit").insert({
+                                "student_id": student_id,
+                                "exam_content": exam_data,
+                                "status": "ready"
+                            }).execute()
+                            if res_insert.data:
+                                st.session_state.current_exam_id = res_insert.data[0]['id']
+                            
+                            st.success("✅ Examen généré et sauvegardé!")
+                            time.sleep(1)
+                            st.rerun()
+                        except Exception as e_supa:
+                            st.error(f"Examen généré mais erreur de sauvegarde: {e_supa}")
+                            # Still show the exam even if save failed
+                            st.rerun()
+                    else:
+                        st.error(f"Erreur n8n ({response.status_code}): {response.text}")
                 except Exception as e:
-                    st.error(f"Erreur: {str(e)}")
+                    st.error(f"Erreur lors de la génération: {str(e)}")
 
-# --- LOGIQUE D'ATTENTE DE GÉNÉRATION ---
-if st.session_state.get("is_waiting"):
-    with st.status("⏳ Génération de l'examen en cours...", expanded=True) as status:
-        for attempt in range(30):
-            res = supabase.table("exams_streamlit").select("*").eq("student_id", student_id).order("created_at", desc=True).limit(1).execute()
-            
-            if res.data and res.data[0]['status'] == 'ready':
-                st.session_state.exam_json = res.data[0]['exam_content']
-                st.session_state.current_exam_id = res.data[0]['id']
-                st.session_state.is_waiting = False
-                status.update(label="✅ Examen prêt!", state="complete", expanded=False)
-                st.rerun()
-                break
-            
-            time.sleep(3)
-        
-        if st.session_state.get("is_waiting"):
-            status.update(label="❌ Délai dépassé", state="error")
-            st.error("La génération a pris trop de temps. Veuillez réessayer.")
+# --- LOGIQUE D'ATTENTE DE GÉNÉRATION (SUPPRIMÉE CAR SYNC) ---
 
 # --- AFFICHAGE DE L'EXAMEN ---
 if st.session_state.get("exam_json") and not st.session_state.get('correction_data'):
@@ -344,6 +523,10 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
         st.rerun()
     
     data = st.session_state.exam_json
+    
+    # Apply normalization (handles both direct n8n response and loaded from supa)
+    data = normalize_exam_data(data)
+
     if isinstance(data, str):
         try:
             # Clean possible markdown block
@@ -353,14 +536,23 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
             if cleaned_data.endswith("```"):
                 cleaned_data = cleaned_data[:-3]
             data = json.loads(cleaned_data.strip())
+            # Re-normalize after parsing string
+            data = normalize_exam_data(data)
         except Exception as e:
             st.error(f"❌ Erreur lors du chargement de l'examen: {str(e)}")
             with st.expander("Détails techniques"):
                 st.code(data)
             st.stop()
 
+    # Re-check for list after string parsing (if string was a list)
+    if isinstance(data, list) and len(data) > 0:
+        data = data[0]
+
     if not isinstance(data, dict):
         st.error("❌ Données d'examen invalides (Format non-dict)")
+        with st.expander("🔍 Voir les données reçues (DEBUG)"):
+            st.write(f"Type: `{type(data)}`")
+            st.write(data)
         st.stop()
     
     if not any(k in data for k in ['comprehension', 'language', 'writing']):
@@ -380,35 +572,47 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
             col2.metric("📊 Points Total", data['info']['total_points'])
     
     # Onglets
-    t1, t2, t3 = st.tabs(["📖 Reading", "🔤 Language", "✍️ Writing"])
+    t1, t2, t3 = st.tabs(["I. COMPREHENSION (15 pts)", "II. LANGUAGE (15 pts)", "III. WRITING (10 pts)"])
 
     with t1:
         if 'comprehension' in data:
             comp = data['comprehension']
             if 'texte' in comp:
-                st.info(comp['texte'])
+                st.markdown(f'<div style="background-color: #f9f9f9; padding: 20px; border-left: 5px solid #333; margin-bottom: 30px;">{comp["texte"]}</div>', unsafe_allow_html=True)
             
             if 'exercices' in comp:
-                for exercice in comp['exercices']:
-                    ex_id = exercice.get('id', '?')
-                    st.markdown(f"### Exercice {ex_id}")
-                    st.markdown(f"**{exercice.get('consigne', '')}**")
+                for idx_ex, exercice in enumerate(comp['exercices']):
+                    abc = chr(65 + idx_ex) # A, B, C...
+                    consigne = exercice.get('consigne', '').upper()
+                    st.markdown(f'<div class="instr-bold">{abc}. {consigne}</div>', unsafe_allow_html=True)
                     
                     for q_idx, question in enumerate(exercice.get('questions', [])):
                         q_text = question.get('question', '')
+                        q_id = question.get('id', f"comp_{idx_ex}_{q_idx}")
                         points = question.get('points', 0)
-                        st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                        st.text_area("Réponse:", key=f"comp_{ex_id}_{q_idx}", height=100, on_change=save_answers)
+                        
+                        st.markdown(f"**{q_idx + 1}.** {q_text} <span class='points-tag'>({points} pt{'s' if points > 1 else ''})</span>", unsafe_allow_html=True)
+                        st.text_area("Réponse:", key=q_id, height=100, on_change=save_answers, label_visibility="collapsed")
 
     with t2:
         if 'language' in data:
             lang = data['language']
             
             if 'exercices' in lang:
-                for exercice in lang['exercices']:
-                    ex_id = exercice.get('id', '?')
-                    st.markdown(f"### Exercice {ex_id}")
-                    st.markdown(f"**{exercice.get('consigne', '')}**")
+                for idx_ex, exercice in enumerate(lang['exercices']):
+                    abc = chr(65 + idx_ex) # A, B, C...
+                    consigne = exercice.get('consigne', '').upper()
+                    st.markdown(f'<div class="instr-bold">{abc}. {consigne}</div>', unsafe_allow_html=True)
+                    
+                    # Handle both 'details' (standard) and 'questions' (n8n variant)
+                    qs = exercice.get('details') or exercice.get('questions') or []
+                    for q_idx, q_item in enumerate(qs):
+                        q_text = q_item.get('question', '')
+                        q_id = q_item.get('id', f"lang_{idx_ex}_{q_idx}")
+                        points = q_item.get('points', 0)
+                        
+                        st.markdown(f"**{q_idx + 1}.** {q_text} <span class='points-tag'>({points} pt{'s' if points > 1 else ''})</span>", unsafe_allow_html=True)
+                        st.text_area("Réponse:", key=q_id, height=80, on_change=save_answers, label_visibility="collapsed")
                     
                     if 'matching' in exercice:
                         st.write("**Matching Exercise:**")
@@ -421,35 +625,30 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
                             st.write("**Fonctions:**")
                             for func in exercice['matching'].get('fonctions', []):
                                 st.write(f"- {func['id']}. {func['text']}")
-                        st.text_input("Réponses (ex: 1-a, 2-b...)", key=f"lang_{ex_id}_0", on_change=save_answers)
-                    
-                    if 'details' in exercice:
-                        for q_idx, detail in enumerate(exercice['details']):
-                            q_text = detail.get('question', '')
-                            points = detail.get('points', 0)
-                            st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                            st.text_area("Réponse:", key=f"lang_{ex_id}_{q_idx}", height=80, on_change=save_answers)
-                    
-                    if 'questions' in exercice:
-                        for q_idx, question in enumerate(exercice['questions']):
-                            q_text = question.get('question', '')
-                            points = question.get('points', 0)
-                            st.markdown(f"**Q:** {q_text} _(points: {points})_")
-                            st.text_area("Réponse:", key=f"lang_free_{ex_id}_{q_idx}", height=100, on_change=save_answers)
+                        
+                        # Assuming points for matching are at the exercise level or default to 0
+                        matching_points = exercice['matching'].get('points', 0)
+                        q_instr = exercice['matching'].get('instruction', '')
+                        
+                        if q_instr:
+                            st.markdown(f"**{q_instr.upper()}**")
+                        st.markdown(f"**Q:** Match the expressions with their functions <span class='points-tag'>({matching_points} pts)</span>", unsafe_allow_html=True)
+                        st.text_area("Réponse (e.g., 1-A, 2-B):", key=f"lang_match_{idx_ex}_0", height=100, on_change=save_answers, label_visibility="collapsed")
 
     with t3:
         if 'writing' in data:
             writing = data['writing']
             
             if 'sujets' in writing:
-                for sujet in writing['sujets']:
+                for idx_sujet, sujet in enumerate(writing['sujets']):
                     sujet_id = sujet.get('id', '?')
-                    sujet_type = sujet.get('type', '?')
+                    sujet_type = sujet.get('type', sujet.get('instruction', 'WRITING')).upper()
                     points = sujet.get('points', 0)
                     
-                    st.markdown(f"### Sujet {sujet_id}: {sujet_type} _(points: {points})_")
-                    st.markdown(f"**{sujet.get('sujet', 'Pas de description')}**")
-                    st.text_area("Votre réponse:", key=f"writing_{sujet_id}", height=250, on_change=save_answers)
+                    abc = chr(65 + idx_sujet)
+                    st.markdown(f'<div class="instr-bold">{abc}. {sujet_type} ({points} pts)</div>', unsafe_allow_html=True)
+                    st.markdown(f"**{sujet.get('sujet', sujet.get('question_text', 'Pas de description'))}**")
+                    st.text_area("Votre réponse:", key=sujet_id, height=300, on_change=save_answers, label_visibility="collapsed")
     
     # SOUMISSION
     st.divider()
@@ -474,10 +673,11 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
                             "status": "submitted"
                         }).eq("id", st.session_state.current_exam_id).execute()
                         
-                        webhook_correction = os.getenv("N8N_CORRECTION_WEBHOOK", "http://localhost:5678/webhook-test/correction")
+                        webhook_correction = os.getenv("N8N_CORRECTION_WEBHOOK", "https://n8n.faysal.me/webhook/correction-exam")
                         requests.post(webhook_correction, json={
                             "student_id": st.session_state.current_user,
                             "exam_id": st.session_state.current_exam_id,
+                            "answers": user_answers,
                             "action": "start_correction"
                         })
                         
