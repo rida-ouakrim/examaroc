@@ -346,14 +346,27 @@ if st.session_state.get("exam_json") and not st.session_state.get('correction_da
     data = st.session_state.exam_json
     if isinstance(data, str):
         try:
-            data = json.loads(data.strip("`json\n"))
-        except:
-            st.error("❌ Erreur JSON")
+            # Clean possible markdown block
+            cleaned_data = data.strip()
+            if cleaned_data.startswith("```json"):
+                cleaned_data = cleaned_data[7:]
+            if cleaned_data.endswith("```"):
+                cleaned_data = cleaned_data[:-3]
+            data = json.loads(cleaned_data.strip())
+        except Exception as e:
+            st.error(f"❌ Erreur lors du chargement de l'examen: {str(e)}")
+            with st.expander("Détails techniques"):
+                st.code(data)
             st.stop()
 
     if not isinstance(data, dict):
-        st.error("❌ Données invalides")
+        st.error("❌ Données d'examen invalides (Format non-dict)")
         st.stop()
+    
+    if not any(k in data for k in ['comprehension', 'language', 'writing']):
+        st.warning("⚠️ L'examen semble vide ou mal structuré.")
+        with st.expander("Voir le contenu reçu"):
+            st.json(data)
     
     title = data['info'].get('title') if 'info' in data else 'Examen'
     st.title(title)
