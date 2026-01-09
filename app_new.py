@@ -512,6 +512,15 @@ if st.session_state.get("waiting_for_correction"):
 
 # --- AFFICHAGE DES RÉSULTATS ---
 if st.session_state.get('correction_data'):
+    # Lazy load exam_content if missing (e.g. when view is clicked directly from dashboard)
+    if not st.session_state.get('exam_json') and st.session_state.get('current_exam_id'):
+        try:
+            res_exam = supabase.table("exams_streamlit").select("exam_content").eq("id", st.session_state.current_exam_id).execute()
+            if res_exam.data:
+                st.session_state.exam_json = res_exam.data[0].get('exam_content')
+        except:
+            pass
+
     if st.button("← Retour"):
         st.session_state.correction_data = None
         st.session_state.exam_json = None
@@ -629,6 +638,20 @@ if st.session_state.get('correction_data'):
         
         if comp_items:
             st.subheader("📖 Section Compréhension")
+            
+            # Afficher le texte de lecture s'il est disponible dans exam_json
+            if st.session_state.get('exam_json'):
+                data = st.session_state.get('exam_json')
+                if isinstance(data, str):
+                    try:
+                        data = json.loads(data.strip("`json\n"))
+                    except:
+                        data = None
+                
+                if isinstance(data, dict) and 'comprehension' in data and 'texte' in data['comprehension']:
+                    with st.expander("📖 Lire le texte à nouveau", expanded=False):
+                        st.info(data['comprehension']['texte'])
+            
             for item in comp_items:
                 render_correction_item(item)
         
