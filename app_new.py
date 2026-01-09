@@ -627,18 +627,21 @@ if st.session_state.get('correction_data'):
     
     st.divider()
     
-    # Détails par section
+    # Détails par section (Onglets)
     if corrections:
-        # Sort items by ID or preserve ordering from 'results'
-        # Group by section for better UX
         comp_items = [item for item in corrections if str(item.get('id', '')).startswith('comp_')]
         lang_items = [item for item in corrections if str(item.get('id', '')).startswith('lang_')]
         writing_items = [item for item in corrections if str(item.get('id', '')).startswith('writing_')]
         other_items = [item for item in corrections if item not in comp_items and item not in lang_items and item not in writing_items]
         
-        if comp_items:
-            st.subheader("📖 Section Compréhension")
-            
+        tab_titles = ["📖 Reading", "🔤 Language", "✍️ Writing"]
+        if other_items:
+            tab_titles.append("📝 Others")
+        
+        tabs = st.tabs(tab_titles)
+        
+        # --- TAB: READING ---
+        with tabs[0]:
             # Afficher le texte de lecture s'il est disponible dans exam_json
             if st.session_state.get('exam_json'):
                 data = st.session_state.get('exam_json')
@@ -652,23 +655,33 @@ if st.session_state.get('correction_data'):
                     with st.expander("📖 Lire le texte à nouveau", expanded=False):
                         st.info(data['comprehension']['texte'])
             
-            for item in comp_items:
-                render_correction_item(item)
-        
-        if lang_items:
-            st.subheader("🔤 Section Langue")
-            for item in lang_items:
-                render_correction_item(item)
-        
-        if writing_items:
-            st.subheader("✍️ Section Rédaction")
-            for item in writing_items:
-                render_correction_item(item)
-        
+            if comp_items:
+                for item in comp_items:
+                    render_correction_item(item)
+            else:
+                st.info("Aucune question de compréhension trouvée.")
+
+        # --- TAB: LANGUAGE ---
+        with tabs[1]:
+            if lang_items:
+                for item in lang_items:
+                    render_correction_item(item)
+            else:
+                st.info("Aucune question de langue trouvée.")
+
+        # --- TAB: WRITING ---
+        with tabs[2]:
+            if writing_items:
+                for item in writing_items:
+                    render_correction_item(item)
+            else:
+                st.info("Aucune section de rédaction trouvée.")
+
+        # --- TAB: OTHERS (if any) ---
         if other_items:
-            st.subheader("📝 Autres Questions")
-            for item in other_items:
-                render_correction_item(item)
+            with tabs[3]:
+                for item in other_items:
+                    render_correction_item(item)
         
         st.divider()
         
